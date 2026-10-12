@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -25,7 +27,7 @@ class IncidentAPITests(APITestCase):
 		self.assertEqual(response.data['title'], 'Database unavailable')
 		self.assertEqual(Incident.objects.count(), 1)
 
-	def test_creation_uses_default_values(self):
+	def test_creation_defaults_and_server_timestamp(self):
 		start_time = timezone.now()
 		response = self.client.post(
 			self.url,
@@ -64,14 +66,73 @@ class IncidentAPITests(APITestCase):
 		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 		self.assertIn('severity', response.data)
 
+	def test_anonymous_get_and_post_are_denied(self):
+		self.client.force_authenticate(user=None)
+
+		get_response = self.client.get(self.url)
+		post_response = self.client.post(
+			self.url,
+			{'title': 'Anonymous incident'},
+			format='json',
+		)
+
+		self.assertIn(get_response.status_code, (401, 403))
+		self.assertIn(post_response.status_code, (401, 403))
+
+	def test_list_orders_newest_first_with_id_tiebreaker(self):
+		older = Incident.objects.create(title='Older')
+		tied_first = Incident.objects.create(title='Tied first')
+		tied_second = Incident.objects.create(title='Tied second')
+		now = timezone.now()
+		Incident.objects.filter(pk=older.pk).update(created_at=now - timedelta(days=1))
+		Incident.objects.filter(pk__in=(tied_first.pk, tied_second.pk)).update(created_at=now)
+
+		response = self.client.get(self.url)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(
+			[item['id'] for item in response.data['results']],
+			[tied_second.id, tied_first.id, older.id],
+		)
+
+	def test_list_is_paginated_with_ten_results(self):
+		self.create_incidents(12)
+
+		response = self.client.get(self.url)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['count'], 12)
+		self.assertIsNotNone(response.data['next'])
+		self.assertIsNone(response.data['previous'])
+		self.assertEqual(len(response.data['results']), 10)
+
+	def test_second_page_contains_remaining_oldest_incidents(self):
+		incident_ids = self.create_incidents(12)
+
+		response = self.client.get(self.url, {'page': 2})
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['count'], 12)
+		self.assertIsNone(response.data['next'])
+		self.assertIsNotNone(response.data['previous'])
+		self.assertEqual(
+			[item['id'] for item in response.data['results']],
+			list(reversed(incident_ids[:2])),
+		)
+
+	def create_incidents(self, count):
+		incidents = [Incident.objects.create(title=f'Incident {index}') for index in range(count)]
+		Incident.objects.all().update(created_at=timezone.now())
+		return [incident.id for incident in incidents]
 	def test_lists_incidents(self):
 		incident = Incident.objects.create(title='Queue backlog')
 
 		response = self.client.get(self.url)
 
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
-		self.assertEqual(len(response.data), 1)
-		self.assertEqual(response.data[0]['id'], incident.id)
+		self.assertEqual(response.data['count'], 1)
+		self.assertEqual(len(response.data['results']), 1)
+		self.assertEqual(response.data['results'][0]['id'], incident.id)
 
 	def test_anonymous_get_is_denied(self):
 		self.client.force_authenticate(user=None)
