@@ -13,8 +13,8 @@ class IncidentAPITests(APITestCase):
 	url = '/api/incidents/'
 
 	def setUp(self):
-		user = get_user_model().objects.create_user(username='incident-tester')
-		self.client.force_authenticate(user=user)
+		self.user = get_user_model().objects.create_user(username='incident-tester')
+		self.client.force_authenticate(user=self.user)
 
 	def test_create_incident(self):
 		response = self.client.post(
@@ -26,6 +26,7 @@ class IncidentAPITests(APITestCase):
 		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 		self.assertEqual(response.data['title'], 'Database unavailable')
 		self.assertEqual(Incident.objects.count(), 1)
+		self.assertEqual(Incident.objects.get().owner, self.user)
 
 	def test_creation_defaults_and_server_timestamp(self):
 		start_time = timezone.now()
@@ -47,6 +48,7 @@ class IncidentAPITests(APITestCase):
 		self.assertIsNotNone(created_at)
 		self.assertGreaterEqual(created_at, start_time)
 		self.assertLessEqual(created_at, end_time)
+		self.assertEqual(Incident.objects.get().owner, self.user)
 
 	def test_rejects_empty_or_whitespace_only_title(self):
 		for title in ('', '   '):
@@ -80,9 +82,9 @@ class IncidentAPITests(APITestCase):
 		self.assertIn(post_response.status_code, (401, 403))
 
 	def test_list_orders_newest_first_with_id_tiebreaker(self):
-		older = Incident.objects.create(title='Older')
-		tied_first = Incident.objects.create(title='Tied first')
-		tied_second = Incident.objects.create(title='Tied second')
+		older = Incident.objects.create(title='Older', owner=self.user)
+		tied_first = Incident.objects.create(title='Tied first', owner=self.user)
+		tied_second = Incident.objects.create(title='Tied second', owner=self.user)
 		now = timezone.now()
 		Incident.objects.filter(pk=older.pk).update(created_at=now - timedelta(days=1))
 		Incident.objects.filter(pk__in=(tied_first.pk, tied_second.pk)).update(created_at=now)
@@ -121,11 +123,15 @@ class IncidentAPITests(APITestCase):
 		)
 
 	def create_incidents(self, count):
-		incidents = [Incident.objects.create(title=f'Incident {index}') for index in range(count)]
-		Incident.objects.all().update(created_at=timezone.now())
+		incidents = [
+			Incident.objects.create(title=f'Incident {index}', owner=self.user)
+			for index in range(count)
+		]
+		Incident.objects.filter(owner=self.user).update(created_at=timezone.now())
 		return [incident.id for incident in incidents]
+
 	def test_lists_incidents(self):
-		incident = Incident.objects.create(title='Queue backlog')
+		incident = Incident.objects.create(title='Queue backlog', owner=self.user)
 
 		response = self.client.get(self.url)
 
@@ -133,6 +139,42 @@ class IncidentAPITests(APITestCase):
 		self.assertEqual(response.data['count'], 1)
 		self.assertEqual(len(response.data['results']), 1)
 		self.assertEqual(response.data['results'][0]['id'], incident.id)
+
+	def test_user_sees_only_their_own_incidents(self):
+		own_incident = Incident.objects.create(title='Mine', owner=self.user)
+		other_user = get_user_model().objects.create_user(username='other-user')
+		Incident.objects.create(title='Theirs', owner=other_user)
+
+		response = self.client.get(self.url)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['count'], 1)
+		self.assertEqual(response.data['results'][0]['id'], own_incident.id)
+
+	def test_other_user_cannot_see_incidents(self):
+		Incident.objects.create(title='User A incident', owner=self.user)
+		other_user = get_user_model().objects.create_user(username='other-user')
+		self.client.force_authenticate(user=other_user)
+
+		response = self.client.get(self.url)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['count'], 0)
+		self.assertEqual(response.data['results'], [])
+
+	def test_client_cannot_override_incident_owner(self):
+		other_user = get_user_model().objects.create_user(username='other-user')
+
+		response = self.client.post(
+			self.url,
+			{'title': 'Owned by requester', 'owner': other_user.pk},
+			format='json',
+		)
+
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		incident = Incident.objects.get()
+		self.assertEqual(incident.owner, self.user)
+		self.assertEqual(response.data['owner'], self.user.pk)
 
 	def test_anonymous_get_is_denied(self):
 		self.client.force_authenticate(user=None)
