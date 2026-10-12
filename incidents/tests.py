@@ -124,3 +124,26 @@ class IncidentAPITests(APITestCase):
 		incidents = [Incident.objects.create(title=f'Incident {index}') for index in range(count)]
 		Incident.objects.all().update(created_at=timezone.now())
 		return [incident.id for incident in incidents]
+	def test_lists_incidents(self):
+		incident = Incident.objects.create(title='Queue backlog')
+
+		response = self.client.get(self.url)
+
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['count'], 1)
+		self.assertEqual(len(response.data['results']), 1)
+		self.assertEqual(response.data['results'][0]['id'], incident.id)
+
+	def test_anonymous_get_is_denied(self):
+		self.client.force_authenticate(user=None)
+
+		response = self.client.get(self.url)
+
+		self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+	def test_anonymous_post_is_denied(self):
+		self.client.force_authenticate(user=None)
+
+		response = self.client.post(self.url, {'title': 'Anonymous incident'}, format='json')
+
+		self.assertIn(response.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
