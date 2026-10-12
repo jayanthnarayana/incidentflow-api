@@ -11,7 +11,12 @@ class IncidentPagination(PageNumberPagination):
 
 
 class IncidentListCreateView(ListCreateAPIView):
-	queryset = Incident.objects.order_by('-created_at', '-id')
 	serializer_class = IncidentSerializer
 	permission_classes = [IsAuthenticated]
 	pagination_class = IncidentPagination
+
+	def get_queryset(self):
+		return Incident.objects.filter(owner=self.request.user).order_by('-created_at', '-id')
+
+	def perform_create(self, serializer):
+		serializer.save(owner=self.request.user)
